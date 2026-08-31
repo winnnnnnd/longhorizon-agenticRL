@@ -58,6 +58,7 @@ Important defaults:
 | Policy learning rate | `1e-6` |
 | LoRA rank / alpha | 16 / 32 |
 | Maximum model length | 24,576 |
+| Context compaction | enabled after 16,384 input tokens; preserve the latest complete tool group |
 | Maximum training steps | 500 |
 | Save / validation frequency | 50 / 50 |
 | KL reward / KL loss | disabled / disabled |
@@ -76,6 +77,8 @@ rates. `skipped_update` records make zero-signal attempts visible even though
 they do not advance the optimizer step.
 
 The canonical configuration is [`configs/grpo.yaml`](../configs/grpo.yaml).
+Context compaction can be disabled for an ablation by setting
+`SHOPPING_CONTEXT_COMPACTION_ENABLE=false`.
 Advanced overrides may be appended after `--`:
 
 ```bash

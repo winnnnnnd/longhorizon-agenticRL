@@ -55,6 +55,8 @@ class OpenAIJSONClient:
         model: str,
         base_url: str,
         api_key: str,
+        model_revision: str | None = None,
+        provider_id: str | None = None,
         max_tokens: int = 4096,
         timeout: float = 120,
         retries: int = 2,
@@ -75,6 +77,8 @@ class OpenAIJSONClient:
         if int(retries) < 0:
             raise ValueError("retries cannot be negative")
         self.model = str(model)
+        self.model_revision = str(model_revision or model)
+        self.provider_id = str(provider_id or "openai-compatible")
         self.base_url = str(base_url).rstrip("/")
         self.api_key = str(api_key)
         self.max_tokens = int(max_tokens)
@@ -195,6 +199,8 @@ class OpenAIJSONClient:
                 "provider_request_id": response.get("id"),
                 "provider_model": response.get("model") or self.model,
                 "requested_model": self.model,
+                "model_revision": self.model_revision,
+                "provider_id": self.provider_id,
                 "requested_thinking": self.thinking,
                 "requested_reasoning_effort": (
                     self.reasoning_effort if self.thinking else None
@@ -228,6 +234,8 @@ def client_from_environment(
         raise ValueError("OPENAI_API_KEY is required")
     return OpenAIJSONClient(
         model=model,
+        model_revision=model,
+        provider_id="openai-environment",
         base_url=base_url,
         api_key=api_key,
         max_tokens=max_tokens,

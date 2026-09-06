@@ -1,0 +1,29 @@
+{
+  "schema_version": "shopping-experience-validation-thresholds-v1",
+  "bootstrap": {
+    "samples": 10000,
+    "seed": 42
+  },
+  "candidate": {
+    "minimum_targeted_pairs": 20,
+    "strict_success_delta_exclusive_min": 0.0,
+    "strict_success_ci_lower_min": 0.0,
+    "wrong_purchase_increase_max": 0,
+    "reward_unverifiable_increase_max": 0,
+    "guard_rejection_mean_increase_max": 0.0,
+    "repeat_loop_increase_max": 0,
+    "max_steps_increase_max": 0,
+    "injection_tokens_per_turn_max": 500,
+    "selected_experiences_per_turn_max": 3
+  },
+  "store": {
+    "minimum_pairs": 50,
+    "strict_success_delta_min": -0.01,
+    "wrong_purchase_increase_max": 0,
+    "reward_unverifiable_increase_max": 0,
+    "guard_rejection_mean_increase_max": 0.0,
+    "repeat_loop_increase_max": 0,
+    "max_steps_increase_max": 0,
+    "infrastructure_invalid_increase_max": 0
+  }
+}

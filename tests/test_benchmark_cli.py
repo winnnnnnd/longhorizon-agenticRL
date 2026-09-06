@@ -34,6 +34,7 @@ class BenchmarkCliTest(unittest.TestCase):
         self.assertEqual(args.max_steps, 35)
         self.assertEqual(args.max_tokens, 512)
         self.assertEqual(args.temperature, 0.0)
+        self.assertIsNone(args.actor_revision)
         self.assertEqual(args.context_window, 24576)
         self.assertEqual(args.context_safety_margin, 512)
         self.assertFalse(args.context_compaction)

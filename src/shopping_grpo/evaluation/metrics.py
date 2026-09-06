@@ -23,6 +23,7 @@ _ASIN = re.compile(rf"(?<!\d){PRODUCT_ID_CAPTURE}(?!\d)")
 _INFRASTRUCTURE_ERROR_TYPES = {
     "ContextBudgetError",
     "RemoteDisconnected",
+    "SemanticCompactionError",
     "ShopHttpError",
     "TimeoutError",
     "URLError",

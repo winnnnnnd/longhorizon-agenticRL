@@ -77,6 +77,7 @@ class OpenAIChatClient:
         observation_search_top_k=20,
         token_counter=None,
         observation_token_counter=None,
+        context_compactor=None,
         transport=None,
     ):
         self.model = model
@@ -127,7 +128,16 @@ class OpenAIChatClient:
             self.observation_token_counter = observation_token_counter
         self.last_context_event = None
         self.last_context_tokens = None
+        self.context_compactor = context_compactor
+        self.sampling_seed = None
         self.transport = transport
+
+    def begin_trajectory(self, sampling_seed=None):
+        if sampling_seed is not None and self.responses_api:
+            raise ValueError("paired sampling seeds require a chat-completions actor endpoint")
+        self.sampling_seed = (
+            int(sampling_seed) if sampling_seed is not None else None
+        )
 
     def complete(self, messages, tools):
         """请求模型下一轮回复，并在上下文超限时按配置压缩历史。"""
@@ -143,14 +153,23 @@ class OpenAIChatClient:
                     raise ContextBudgetError(
                         f"prompt uses {original_tokens} tokens, above input budget {input_budget}"
                     )
-                request_messages, stats = compact_chat_messages(
-                    messages,
-                    tools,
-                    count_tokens=self.token_counter,
-                    max_input_tokens=input_budget,
-                )
-                if stats.removed_groups:
-                    self.last_context_event = stats.to_dict()
+                if self.context_compactor is not None:
+                    request_messages, event = self.context_compactor.compact(
+                        messages,
+                        tools,
+                        count_tokens=self.token_counter,
+                        max_input_tokens=input_budget,
+                    )
+                    self.last_context_event = event
+                else:
+                    request_messages, stats = compact_chat_messages(
+                        messages,
+                        tools,
+                        count_tokens=self.token_counter,
+                        max_input_tokens=input_budget,
+                    )
+                    if stats.removed_groups:
+                        self.last_context_event = stats.to_dict()
         if self.responses_api:
             payload = {
                 "model": self.model,
@@ -169,6 +188,8 @@ class OpenAIChatClient:
                 # 不能防止模型在未调用工具时持续生成纯文本。
                 "max_tokens": self.max_tokens,
             }
+            if self.sampling_seed is not None:
+                payload["seed"] = self.sampling_seed
         if self.thinking:
             # DeepSeek tool-call thinking requires reasoning_content in later messages.
             payload.update(
@@ -279,12 +300,15 @@ def collect_for_task(
     max_steps=30,
     tools=None,
     attempt_index=0,
+    sampling_seed=None,
+    experience_runtime=None,
 ):
     """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。"""
     trajectory = {
         "trajectory_id": str(uuid4()),
         "task_id": int(task["task_id"]),
         "attempt_index": int(attempt_index),
+        "sampling_seed": int(sampling_seed) if sampling_seed is not None else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
         "messages": [],
@@ -300,6 +324,24 @@ def collect_for_task(
         "error": None,
         "release_error": None,
     }
+    experience_session = None
+    begin_trajectory = getattr(client, "begin_trajectory", None)
+    if begin_trajectory is not None:
+        begin_trajectory(sampling_seed)
+    elif sampling_seed is not None:
+        raise ValueError("client does not support paired sampling seeds")
+    if experience_runtime is not None:
+        if not getattr(client, "context_compaction_enable", False):
+            raise ValueError("experience injection requires context compaction")
+        if getattr(client, "context_compactor", None) is None:
+            raise ValueError("experience injection requires semantic context compaction")
+        if getattr(client, "token_counter", None) is None:
+            raise ValueError("experience injection requires exact actor token counting")
+        experience_session = experience_runtime.start_session(
+            task=task,
+            max_steps=max_steps,
+        )
+        trajectory["experience"] = experience_session.header()
     env = env_factory(base_url=base_url)
     try:
         # reset 建立任务状态；后续每一轮只允许一个工具调用。
@@ -321,7 +363,17 @@ def collect_for_task(
 
         while len(trajectory["steps"]) < int(max_steps):
             # 先请求模型，再校验动作；工具结果会追加到 messages，成为下一轮上下文。
-            assistant = client.complete(messages, tool_schemas)
+            request_messages = messages
+            if experience_session is not None:
+                request_messages, experience_event = experience_session.prepare_request(
+                    messages=messages,
+                    tools=tool_schemas,
+                    trajectory=trajectory,
+                    latest_observation=latest_observation,
+                    count_tokens=client.token_counter,
+                )
+                trajectory["experience"]["events"].append(experience_event)
+            assistant = client.complete(request_messages, tool_schemas)
             context_tokens = getattr(client, "last_context_tokens", None)
             if context_tokens is not None:
                 trajectory["context_turn_tokens"].append(
@@ -458,10 +510,16 @@ def collect_tasks(
     max_steps=30,
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
+    sampling_seeds=None,
+    experience_runtime=None,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
         raise ValueError("attempts_per_task must be at least 1")
+    if sampling_seeds is not None:
+        sampling_seeds = tuple(int(seed) for seed in sampling_seeds)
+        if len(sampling_seeds) != attempts_per_task:
+            raise ValueError("sampling_seeds must match attempts_per_task")
     done = completed_task_attempts(output_path)
     written = []
     for task in tasks:
@@ -476,6 +534,12 @@ def collect_tasks(
                 base_url=base_url,
                 max_steps=max_steps,
                 attempt_index=attempt_index,
+                sampling_seed=(
+                    sampling_seeds[attempt_index]
+                    if sampling_seeds is not None
+                    else None
+                ),
+                experience_runtime=experience_runtime,
             )
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)

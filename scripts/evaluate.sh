@@ -8,6 +8,17 @@ SHOPSIM_BASE_URL="${SHOPSIM_BASE_URL:-http://127.0.0.1:5700}"
 LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
+EXPERIENCE_ARGS=()
+if [[ -n "${EXPERIENCE_CONFIG:-}" ]]; then
+  if [[ -z "${ACTOR_REVISION:-}" ]]; then
+    echo "ACTOR_REVISION is required when EXPERIENCE_CONFIG is set" >&2
+    exit 2
+  fi
+  EXPERIENCE_ARGS=(
+    --experience-config "$EXPERIENCE_CONFIG"
+    --actor-revision "$ACTOR_REVISION"
+  )
+fi
 
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
@@ -18,6 +29,7 @@ cd "$ROOT"
   --base-url "$SHOPSIM_BASE_URL" \
   --model "$SERVED_MODEL_NAME" \
   --llm-base-url "$LLM_BASE_URL" \
-  --api-key "$LLM_API_KEY"
+  --api-key "$LLM_API_KEY" \
+  "${EXPERIENCE_ARGS[@]}"
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"

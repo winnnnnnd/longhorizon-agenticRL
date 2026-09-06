@@ -1,0 +1,63 @@
+{
+  "schema_version": "shopping-experience-config-v1",
+  "enabled": true,
+  "store": {
+    "cards": "data/experience/active.jsonl",
+    "manifest": "data/experience/manifest.json",
+    "embeddings": null,
+    "allow_validation_only": false
+  },
+  "retrieval": {
+    "backend": "lexical",
+    "top_k": 3,
+    "minimum_score": 0.2,
+    "provider": {
+      "model": "",
+      "base_url_env": "EXPERIENCE_EMBEDDING_BASE_URL",
+      "api_key_env": "EXPERIENCE_EMBEDDING_API_KEY",
+      "timeout": 120,
+      "dimensions": null
+    }
+  },
+  "injection": {
+    "max_tokens": 500
+  },
+  "semantic_compaction": {
+    "enabled": true,
+    "preserve_recent_groups": 2,
+    "max_records_per_chunk": 12,
+    "max_source_characters": 60000,
+    "cache_path_env": "EXPERIENCE_COMPACTION_CACHE",
+    "cache_path": "outputs/experience/context_compaction_cache.jsonl",
+    "provider": {
+      "model": "deepseek-v4-flash",
+      "model_revision": "deepseek-v4-flash",
+      "provider_id": "dsv4-flash-context",
+      "base_url_env": "EXPERIENCE_DSV4_BASE_URL",
+      "api_key_env": "EXPERIENCE_DSV4_API_KEY",
+      "max_tokens": 4096,
+      "timeout": 180,
+      "retries": 2,
+      "retry_delay_seconds": 2,
+      "thinking": false,
+      "reasoning_effort": "high"
+    }
+  },
+  "distillation": {
+    "maximum_group_size": 8,
+    "similarity_threshold": 0.25,
+    "provider": {
+      "model": "deepseek-v4-flash",
+      "model_revision": "deepseek-v4-flash",
+      "provider_id": "dsv4-flash-distillation",
+      "base_url_env": "EXPERIENCE_DSV4_BASE_URL",
+      "api_key_env": "EXPERIENCE_DSV4_API_KEY",
+      "max_tokens": 8192,
+      "timeout": 180,
+      "retries": 2,
+      "retry_delay_seconds": 2,
+      "thinking": false,
+      "reasoning_effort": "high"
+    }
+  }
+}

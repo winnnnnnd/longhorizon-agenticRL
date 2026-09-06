@@ -262,6 +262,20 @@ def _flatten(groups):
     return [message for group in groups for message in group]
 
 
+def split_chat_tool_groups(messages):
+    """Public validated split used by auditable semantic compaction."""
+
+    original = [dict(message) for message in messages]
+    anchor, groups = _split_chat_tool_groups(original)
+    return anchor, groups
+
+
+def flatten_chat_tool_groups(groups):
+    """Flatten groups previously returned by :func:`split_chat_tool_groups`."""
+
+    return _flatten(groups)
+
+
 def _complete_token_group_ends(response_mask):
     """Return end offsets for every completed 1-valued assistant + 0-valued tool pair."""
     group_ends = []

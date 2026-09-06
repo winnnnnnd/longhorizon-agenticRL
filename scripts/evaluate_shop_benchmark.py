@@ -7,6 +7,7 @@ from pathlib import Path
 
 from shopping_grpo.evaluation.summary import summarize_trajectories
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
+from shopping_grpo.experience.factory import build_experience_components
 
 
 def parse_args():
@@ -16,6 +17,10 @@ def parse_args():
     parser.add_argument("--summary", type=Path, required=True, help="汇总指标 JSON")
     parser.add_argument("--base-url", default="http://127.0.0.1:5700")
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--actor-revision",
+        help="经验实验必须填写不可漂移的 checkpoint/revision/hash。",
+    )
     parser.add_argument("--llm-base-url", required=True)
     parser.add_argument("--api-key", required=True, help="本地 vLLM 可传 EMPTY")
     parser.add_argument("--max-steps", type=int, default=35)
@@ -49,6 +54,13 @@ def parse_args():
     parser.add_argument("--observation-detail-token-budget", type=int, default=4096)
     parser.add_argument("--observation-generic-token-budget", type=int, default=768)
     parser.add_argument("--observation-search-top-k", type=int, default=20)
+    parser.add_argument(
+        "--experience-config",
+        type=Path,
+        help=(
+            "启用 Frozen Agent 外部经验；同时强制启用 DSV4 Flash 语义上下文压缩。"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -72,6 +84,18 @@ def main():
         raise SystemExit("--context-window 必须大于 --max-tokens 与安全余量之和")
     if args.observation_token_budget < 0:
         raise SystemExit("--observation-token-budget 不能为负数")
+    if args.experience_config and not args.context_window:
+        raise SystemExit("经验注入要求非零 --context-window 和精确 tokenizer 计数")
+    if args.experience_config and not args.actor_revision:
+        raise SystemExit("经验实验要求显式 --actor-revision")
+    experience_components = (
+        build_experience_components(
+            args.experience_config,
+            allow_validation_only=False,
+        )
+        if args.experience_config
+        else None
+    )
     tasks = load_tasks(args.benchmark)
     client = OpenAIChatClient(
         model=args.model,
@@ -83,7 +107,14 @@ def main():
         max_tokens=args.max_tokens,
         context_window=args.context_window,
         context_safety_margin=args.context_safety_margin,
-        context_compaction_enable=args.context_compaction,
+        context_compaction_enable=(
+            args.context_compaction or experience_components is not None
+        ),
+        context_compactor=(
+            experience_components.context_compactor
+            if experience_components is not None
+            else None
+        ),
         observation_token_budget=args.observation_token_budget,
         observation_detail_token_budget=args.observation_detail_token_budget,
         observation_generic_token_budget=args.observation_generic_token_budget,
@@ -95,6 +126,11 @@ def main():
         output_path=args.output,
         base_url=args.base_url,
         max_steps=args.max_steps,
+        experience_runtime=(
+            experience_components.runtime
+            if experience_components is not None
+            else None
+        ),
     )
     summary = summarize_trajectories(
         [task["task_id"] for task in tasks], _read_jsonl(args.output)
@@ -102,6 +138,7 @@ def main():
     summary["protocol"] = {
         "benchmark": str(args.benchmark),
         "model": args.model,
+        "actor_revision": args.actor_revision,
         "reward_contract": "shopsimulator-reward-v3",
         "max_steps": args.max_steps,
         "max_tokens": args.max_tokens,
@@ -109,11 +146,25 @@ def main():
         "top_p": args.top_p,
         "context_window": args.context_window,
         "context_safety_margin": args.context_safety_margin,
-        "context_compaction": args.context_compaction,
+        "context_compaction": args.context_compaction or experience_components is not None,
+        "context_compaction_strategy": (
+            "deepseek_v4_flash_grounded"
+            if experience_components is not None
+            else (
+                "drop_old_complete_groups"
+                if args.context_compaction
+                else "disabled"
+            )
+        ),
         "observation_token_budget": args.observation_token_budget,
         "observation_detail_token_budget": args.observation_detail_token_budget,
         "observation_generic_token_budget": args.observation_generic_token_budget,
         "observation_search_top_k": args.observation_search_top_k,
+        "experience": (
+            experience_components.runtime.public_manifest()
+            if experience_components is not None
+            else None
+        ),
     }
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

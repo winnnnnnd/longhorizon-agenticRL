@@ -12,3 +12,8 @@ Follow the guides in workflow order:
 
 [Reward v3](reward-v3.md) is the detailed specification shared by collection,
 GRPO and evaluation.
+
+The implemented but not yet executed frozen-actor alternative is specified in
+[Frozen Agent external experience self-evolution](plans/2026-09-06-agent-experience-self-evolution-design.md).
+It reuses the same environment, Reward and evaluation contracts without updating
+actor parameters.

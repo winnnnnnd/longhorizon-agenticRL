@@ -9,6 +9,14 @@ from shopping_grpo.experience.contracts import (
     finalize_experience_card,
     validate_experience_card,
 )
+from shopping_grpo.experience.segment_extraction import (
+    SegmentClusterDistiller,
+    SequentialSegmentExtractor,
+    apply_latest_card_revisions,
+    cluster_segment_extractions,
+    segment_cluster_key,
+)
+from shopping_grpo.experience.segmentation import build_trajectory_segments
 
 __all__ = [
     "EXPERIENCE_CARD_VERSION",
@@ -16,6 +24,12 @@ __all__ = [
     "ExperienceBundle",
     "ExperienceContractError",
     "ExperienceStateView",
+    "SegmentClusterDistiller",
+    "SequentialSegmentExtractor",
+    "apply_latest_card_revisions",
+    "build_trajectory_segments",
+    "cluster_segment_extractions",
     "finalize_experience_card",
+    "segment_cluster_key",
     "validate_experience_card",
 ]

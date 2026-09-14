@@ -10,12 +10,20 @@ from pathlib import Path
 
 from shopping_grpo.evaluation.artifacts import iter_jsonl, write_json_atomic, write_jsonl_atomic
 from shopping_grpo.evaluation.manifest import sha256_file
-from shopping_grpo.experience.promotion import apply_promotion_decisions
+from shopping_grpo.experience.promotion import (
+    apply_promotion_decisions,
+    merge_active_store,
+)
 from shopping_grpo.experience.store import build_store_manifest
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="依据冻结验证决策构建 Active Experience Store")
+    parser.add_argument(
+        "--base-store",
+        type=Path,
+        help="上一版 Active Card JSONL；被拒绝的新 revision 不会删除旧 Active Card。",
+    )
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--decisions", type=Path, required=True)
     parser.add_argument("--validation-manifest", type=Path, required=True)
@@ -39,12 +47,13 @@ def main():
         datetime.fromisoformat(args.created_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise SystemExit("--created-at must be ISO-8601") from exc
-    cards = apply_promotion_decisions(
+    decided_cards = apply_promotion_decisions(
         iter_jsonl(args.candidates),
         iter_jsonl(args.decisions),
         expected_validation_manifest_hash=sha256_file(args.validation_manifest),
     )
-    active = [card for card in cards if card["status"] == "active"]
+    base_cards = list(iter_jsonl(args.base_store)) if args.base_store else []
+    active = merge_active_store(base_cards, decided_cards)
     write_jsonl_atomic(args.output, active, force=args.force)
     manifest = build_store_manifest(
         store_id=args.store_id,
@@ -67,8 +76,18 @@ def main():
             "path": str(args.validation_manifest),
             "sha256": sha256_file(args.validation_manifest),
         },
+        "base_store": (
+            {
+                "path": str(args.base_store),
+                "sha256": sha256_file(args.base_store),
+            }
+            if args.base_store
+            else None
+        ),
         "active_rows": len(active),
-        "rejected_rows": sum(card["status"] == "rejected" for card in cards),
+        "rejected_rows": sum(
+            card["status"] == "rejected" for card in decided_cards
+        ),
     }
     write_json_atomic(args.manifest, manifest, force=args.force)
     print(json.dumps(manifest, ensure_ascii=False))

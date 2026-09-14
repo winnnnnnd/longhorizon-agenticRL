@@ -44,8 +44,9 @@
     }
   },
   "distillation": {
-    "maximum_group_size": 8,
-    "similarity_threshold": 0.25,
+    "context_events": 2,
+    "maximum_prior_knowledge": 24,
+    "maximum_cluster_members": 16,
     "provider": {
       "model": "deepseek-v4-flash",
       "model_revision": "deepseek-v4-flash",

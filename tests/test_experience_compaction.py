@@ -98,7 +98,10 @@ class ExperienceCompactionTest(unittest.TestCase):
         self.assertEqual(compacted, second)
         self.assertEqual(compacted[1]["content"], "原始 query")
         self.assertIn("[EXPERIENCE_GUIDANCE_V1]", compacted[0]["content"])
-        self.assertNotIn("旧候选页面", str(compacted))
+        self.assertFalse(
+            any(message.get("tool_call_id") == "old" for message in compacted)
+        )
+        self.assertIn("[GROUNDED_HISTORY_SUMMARY_V1", compacted[0]["content"])
         self.assertIn("中间候选页面", str(compacted))
         self.assertIn("当前候选页面", str(compacted))
         self.assertEqual(event["model"], "deepseek-v4-flash")

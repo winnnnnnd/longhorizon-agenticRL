@@ -11,9 +11,12 @@ from shopping_grpo.evaluation.trajectory import (
     NORMALIZED_TRAJECTORY_VERSION,
     normalize_trajectory,
 )
+from shopping_grpo.environment.actions import product_ids
+from shopping_grpo.experience.contracts import SOURCE_KINDS
 
 
 WINDOW_VERSION = "shopping-experience-decision-window-v1"
+SEGMENT_VERSION = "shopping-experience-segment-v1"
 _INSTRUCTION_PREFIX = re.compile(r"^\s*Instruction:\s*", re.I)
 _ACTOR_VISIBLE_EVENT_FIELDS = (
     "event_id",
@@ -154,6 +157,110 @@ def actor_visible_events(trajectory: Mapping) -> list[dict]:
         event["phase"] = decision_phase(event)
         result.append(event)
     return result
+
+
+def _segment_state_predicates(events: list[Mapping]) -> list[str]:
+    """Derive only predicates that are directly observable inside a segment."""
+
+    predicates = set()
+    searches = []
+    search_result_sets = []
+    for event in events:
+        tool_name = str(event.get("tool_name") or "")
+        parameters = event.get("parameters") or {}
+        observation = str(event.get("actor_visible_observation") or "")
+        if event.get("event_type") == "guard_rejection" or event.get("guard_reason"):
+            predicates.add("guard_rejected")
+        if tool_name == "open_product":
+            predicates.add("candidate_new")
+        if "available_options:" in observation:
+            predicates.add("has_multiple_options")
+        if "buy now" in observation.casefold():
+            predicates.add("finish_eligible")
+        if tool_name == "search_products":
+            query = str(parameters.get("query") or "").strip().casefold()
+            searches.append(query)
+            search_result_sets.append(tuple(product_ids(observation)))
+
+    nonempty_searches = [query for query in searches if query]
+    if len(nonempty_searches) != len(set(nonempty_searches)):
+        predicates.add("repeated_search")
+    if any(
+        left and left == right
+        for left, right in zip(search_result_sets, search_result_sets[1:])
+    ):
+        predicates.add("search_no_new_candidates")
+    return sorted(predicates)
+
+
+def build_trajectory_segments(
+    trajectory: Mapping,
+    *,
+    source_kind: str,
+    actor_role: str,
+    context_events: int = 2,
+) -> list[dict]:
+    """Split a trajectory into contiguous decision-phase segments.
+
+    A segment owns consecutive events with the same deterministic phase.  Small
+    read-only context windows are attached on both sides, while the segment's
+    own events remain explicit.  Sequential LLM extraction can therefore use
+    earlier derived knowledge without flattening the whole trajectory.
+    """
+
+    if int(context_events) < 0:
+        raise ValueError("context_events cannot be negative")
+    if actor_role not in {"teacher", "student"}:
+        raise ValueError("actor_role must be teacher or student")
+    if source_kind not in SOURCE_KINDS:
+        raise ValueError("source_kind is unsupported")
+    events = actor_visible_events(trajectory)
+    if not events:
+        return []
+    outcome = trajectory_outcome(trajectory, source_kind)
+    trajectory_id = str(trajectory.get("trajectory_id") or "")
+    if not trajectory_id:
+        raise ValueError("trajectory segment requires trajectory_id")
+    task_id = int(trajectory["task_id"])
+    query = public_query(trajectory)
+    if not query:
+        raise ValueError("trajectory segment requires a public query")
+
+    spans = []
+    start = 0
+    for index in range(1, len(events) + 1):
+        if index == len(events) or events[index]["phase"] != events[start]["phase"]:
+            spans.append((start, index))
+            start = index
+
+    segments = []
+    context_size = int(context_events)
+    for segment_index, (start, stop) in enumerate(spans, start=1):
+        owned_events = deepcopy(events[start:stop])
+        segment_id = f"{trajectory_id}:seg{segment_index:04d}"
+        segments.append(
+            {
+                "schema_version": SEGMENT_VERSION,
+                "segment_id": segment_id,
+                "segment_index": segment_index - 1,
+                "trajectory_id": trajectory_id,
+                "task_id": task_id,
+                "actor_role": actor_role,
+                "source_kind": str(source_kind),
+                "public_query": query,
+                "phase": owned_events[0]["phase"],
+                "event_range": {
+                    "start_event_id": owned_events[0]["event_id"],
+                    "end_event_id": owned_events[-1]["event_id"],
+                },
+                "context_before": deepcopy(events[max(0, start - context_size) : start]),
+                "events": owned_events,
+                "context_after": deepcopy(events[stop : stop + context_size]),
+                "observed_state_predicates": _segment_state_predicates(owned_events),
+                "outcome": deepcopy(outcome),
+            }
+        )
+    return segments
 
 
 def trajectory_outcome(trajectory: Mapping, source_kind: str) -> dict:

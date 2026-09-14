@@ -105,3 +105,50 @@ def apply_promotion_decisions(
     if unused:
         raise ExperienceContractError("promotion decisions reference unknown experiences")
     return sorted(output, key=lambda card: (card["experience_id"], card["revision"]))
+
+
+def merge_active_store(
+    base_cards: Iterable[Mapping],
+    decided_cards: Iterable[Mapping],
+) -> list[dict]:
+    """Apply promotion results without dropping the last valid active revision."""
+
+    base = [validate_experience_card(card) for card in base_cards]
+    decided = [validate_experience_card(card) for card in decided_cards]
+    if any(card["status"] != "active" for card in base):
+        raise ExperienceContractError("base store may contain only active cards")
+    if any(card["status"] not in {"active", "rejected"} for card in decided):
+        raise ExperienceContractError(
+            "decided cards must have active or rejected status"
+        )
+    active_by_id = {}
+    for card in base:
+        current = active_by_id.get(card["experience_id"])
+        if current is None or card["revision"] > current["revision"]:
+            active_by_id[card["experience_id"]] = card
+    seen_decisions = set()
+    for card in decided:
+        experience_id = card["experience_id"]
+        if experience_id in seen_decisions:
+            raise ExperienceContractError(
+                "promotion results contain duplicate experience IDs"
+            )
+        seen_decisions.add(experience_id)
+        if card["status"] == "rejected":
+            continue
+        prior = active_by_id.get(experience_id)
+        if prior is not None:
+            if card["revision"] <= prior["revision"]:
+                raise ExperienceContractError(
+                    "promoted revision must be newer than the active revision"
+                )
+            expected = f"{experience_id}@{prior['revision']}"
+            if card.get("supersedes") != expected:
+                raise ExperienceContractError(
+                    "promoted revision must supersede the active revision"
+                )
+        active_by_id[experience_id] = card
+    return sorted(
+        active_by_id.values(),
+        key=lambda card: (card["experience_id"], card["revision"]),
+    )

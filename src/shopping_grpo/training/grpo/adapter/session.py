@@ -34,7 +34,12 @@ class ShopSimulatorSession:
         self._environment_token = None
         self._state_token = None
 
-    async def start(self, task_id: int) -> dict:
+    async def start(
+        self,
+        task_id: int,
+        *,
+        constraint_contract: object = None,
+    ) -> dict:
         """启动一条 trajectory，并把首个 observation 放进运行状态。"""
         if self.env is not None:
             raise RuntimeError("ShopSimulator session has already started")
@@ -49,7 +54,19 @@ class ShopSimulatorSession:
                 self.env = None
             raise
 
-        self.state = make_runtime_state(task_id=task_id, max_steps=self.max_steps)
+        initial_mapping = initial if isinstance(initial, dict) else {}
+        self.state = make_runtime_state(
+            task_id=task_id,
+            max_steps=self.max_steps,
+            requirement_text=initial_mapping.get("instruction", ""),
+            constraint_contract=(
+                constraint_contract
+                if constraint_contract is not None
+                else initial_mapping.get("evidence_constraint_contract")
+                or initial_mapping.get("constraint_contract")
+            ),
+            goal_options=initial_mapping.get("goal_options"),
+        )
         actual_version = (
             initial.get("environment_version") if isinstance(initial, dict) else None
         )

@@ -8,6 +8,11 @@ import json
 import math
 from collections.abc import Mapping
 
+from shopping_grpo.environment.evidence import (
+    action_hash,
+    create_evidence_store,
+)
+
 
 current_environment: ContextVar = ContextVar("shopsimulator_environment", default=None)
 current_runtime_state: ContextVar = ContextVar("shopsimulator_runtime_state", default=None)
@@ -24,7 +29,14 @@ REWARD_V3_TYPES = {
 }
 
 
-def make_runtime_state(task_id: int, max_steps: int) -> dict:
+def make_runtime_state(
+    task_id: int,
+    max_steps: int,
+    *,
+    requirement_text: object = "",
+    constraint_contract: object = None,
+    goal_options: object = None,
+) -> dict:
     """创建只含公共运行诊断的状态，reward 仅在环境正常终局后写入。"""
     return {
         "task_id": int(task_id),
@@ -37,6 +49,16 @@ def make_runtime_state(task_id: int, max_steps: int) -> dict:
         "action_attempt_count": 0,
         "repeat_action_count": 0,
         "recent_action_signatures": [],
+        "action_attempt_log": [],
+        "evidence_store": create_evidence_store(
+            task_id=int(task_id),
+            requirement_text=requirement_text,
+            constraint_contract=constraint_contract,
+            goal_options=goal_options,
+        ),
+        "timeout_type": None,
+        "outcome_classification": None,
+        "external_error": False,
         "terminal_result": {},
         "final_reward": 0.0,
         "reward_version": None,
@@ -90,10 +112,15 @@ def record_observation_projection(state: dict, meta: dict) -> None:
     )
 
 
-def record_action_attempt(state: dict, tool_name: str, parameters: dict, observation: str) -> None:
-    """记录环境动作尝试，并统计最近三次中的重复签名。"""
+def record_action_attempt(
+    state: dict,
+    tool_name: str,
+    parameters: dict,
+    observation: str,
+) -> str | None:
+    """Record a normalized action attempt; repetition is decided after its result."""
     if tool_name == "think":
-        return
+        return None
     canonical_parameters = json.dumps(
         parameters,
         ensure_ascii=False,
@@ -101,13 +128,45 @@ def record_action_attempt(state: dict, tool_name: str, parameters: dict, observa
         separators=(",", ":"),
     )
     observation_fingerprint = hashlib.sha256(str(observation).encode("utf-8")).hexdigest()
-    signature = (str(tool_name), canonical_parameters, observation_fingerprint)
+    stable_action_hash = action_hash(tool_name, parameters)
+    signature = (stable_action_hash, observation_fingerprint)
     recent = state["recent_action_signatures"]
     state["action_attempt_count"] += 1
-    if signature in recent:
-        state["repeat_action_count"] += 1
     recent.append(signature)
     del recent[:-3]
+    state["action_attempt_log"].append(
+        {
+            "tool": str(tool_name),
+            "canonical_parameters": canonical_parameters,
+            "action_hash": stable_action_hash,
+            "observation_hash": observation_fingerprint,
+        }
+    )
+    return stable_action_hash
+
+
+def _evidence_reward_signals(state: Mapping) -> dict:
+    store = state.get("evidence_store")
+    store = store if isinstance(store, Mapping) else {}
+    steps = store.get("steps")
+    step_count = len(steps) if isinstance(steps, list) else 0
+    progress_steps = int(store.get("progress_step_count", 0))
+    coverage = store.get("constraint_coverage")
+    coverage = coverage if isinstance(coverage, Mapping) else {}
+    return {
+        "evidence_progress_rate": progress_steps / max(step_count, 1),
+        "constraint_coverage": float(coverage.get("coverage", 0.0)),
+        "evidence_progress_steps": progress_steps,
+        "evidence_no_progress_steps": int(
+            store.get("consecutive_no_progress_steps", 0)
+        ),
+        "no_progress_repeat_count": int(
+            store.get("no_progress_repeat_count", 0)
+        ),
+        "semantic_repeat_count": int(store.get("semantic_repeat_count", 0)),
+        "timeout_type": state.get("timeout_type"),
+        "external_error": bool(state.get("external_error", False)),
+    }
 
 
 def validate_reward(raw_detail: object) -> dict:
@@ -215,7 +274,7 @@ def _normal_terminal(state: dict) -> bool:
     )
 
 
-def reward_breakdown(state: dict) -> dict[str, float | bool]:
+def reward_breakdown(state: dict) -> dict[str, object]:
     """计算约束感知终局奖励；基础设施无效轨迹只返回诊断，不制造学习信号。"""
     invalid = bool(state.get("infrastructure_invalid"))
     normal_terminal = _normal_terminal(state)
@@ -274,6 +333,7 @@ def reward_breakdown(state: dict) -> dict[str, float | bool]:
             "sampling_invalid": bool(invalid or invalid_reward),
             "infrastructure_invalid": invalid,
             "reward_unverifiable": invalid_reward,
+            **_evidence_reward_signals(state),
         }
 
     action_attempts = max(int(state.get("action_attempt_count", 0)), 1)
@@ -304,6 +364,7 @@ def reward_breakdown(state: dict) -> dict[str, float | bool]:
         "sampling_invalid": True,
         "infrastructure_invalid": True,
         "reward_unverifiable": True,
+        **_evidence_reward_signals(state),
     }
 
 
@@ -359,3 +420,26 @@ def task_id_from_kwargs(kwargs: dict) -> int:
     if not isinstance(extra_info, dict) or "task_id" not in extra_info:
         raise ValueError("veRL sample extra_info is missing task_id")
     return int(extra_info["task_id"])
+
+
+def evidence_contract_from_kwargs(kwargs: dict) -> object:
+    """Read an optional precomputed Rubric/constraint contract from veRL data."""
+
+    extra_info = kwargs.get("extra_info")
+    if hasattr(extra_info, "item"):
+        extra_info = extra_info.item()
+    if not isinstance(extra_info, dict):
+        return None
+    for key in (
+        "evidence_constraint_contract",
+        "requirement_rubric",
+        "rubric_bundle",
+        "constraint_contract",
+    ):
+        value = extra_info.get(key)
+        if isinstance(value, Mapping) and any(
+            contract_key in value
+            for contract_key in ("constraints", "rubrics", "hard_constraints")
+        ):
+            return value
+    return None

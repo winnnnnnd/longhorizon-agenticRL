@@ -76,6 +76,17 @@ including entropy, PPO KL, clip fractions, response lengths and effective-group
 rates. `skipped_update` records make zero-signal attempts visible even though
 they do not advance the optimizer step.
 
+Every trajectory also owns a JSON-serializable `shopping-evidence-store-v1`.
+It is updated from the unprojected structured ShopSimulator result after each
+tool call and is exported only through diagnostics/trajectory artifacts, never
+through the Actor-visible prompt.  Each executed step records `action_hash`,
+`result_hash`, `evidence_delta`, `has_progress`, `repeat_type`, consecutive
+no-progress steps and constraint coverage.  Reward diagnostics expose the
+resulting progress rate, coverage and exact/semantic repeat counts without
+changing Reward v3 terminal utility.  Step-budget exhaustion is additionally
+classified as `no_progress_timeout` or `productive_timeout`; only explicit
+transport/time-out failures may set `external_error`.
+
 The canonical configuration is [`configs/grpo.yaml`](../configs/grpo.yaml).
 Context compaction can be disabled for an ablation by setting
 `SHOPPING_CONTEXT_COMPACTION_ENABLE=false`.

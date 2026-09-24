@@ -4,6 +4,28 @@ from web_agent_site.engine.termination import EvidenceProgressTracker
 
 
 class TerminationV3Test(unittest.TestCase):
+    def test_repeat_requires_same_results_and_no_new_runtime_evidence(self):
+        tracker = EvidenceProgressTracker(
+            exact_repeat_limit=2,
+            no_progress_limit=99,
+        )
+        tracker.record("search", "shoe", ["1", "2", "3"])
+        changed = tracker.record("search", "shoe", ["4", "5", "6"])
+
+        self.assertIsNone(changed["repeat_type"])
+        self.assertEqual(changed["consecutive_repeats"], 0)
+
+    def test_rewritten_query_with_same_results_is_semantic_repeat(self):
+        tracker = EvidenceProgressTracker(
+            exact_repeat_limit=99,
+            no_progress_limit=99,
+        )
+        page = ["1", "2", "3"]
+        tracker.record("search", "waterproof running shoe", page)
+        repeated = tracker.record("search", "running shoe waterproof", page)
+
+        self.assertEqual(repeated["repeat_type"], "semantic_repeat")
+
     def test_result_set_requires_three_new_asins_and_new_fingerprint(self):
         tracker = EvidenceProgressTracker(exact_repeat_limit=99, no_progress_limit=99)
         first = tracker.record("search", "one", ["1", "2"])

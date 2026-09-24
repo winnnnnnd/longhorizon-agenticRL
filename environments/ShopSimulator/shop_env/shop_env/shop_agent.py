@@ -2,6 +2,10 @@ import json
 import logging
 from typing import Dict, Any, Optional
 
+from web_agent_site.engine.constraints import (
+    compile_evidence_constraint_contract,
+)
+
 # Constants
 MAX_HISTORY_LENGTH = 42
 LOG_FILE = "shop_agent.log"
@@ -34,6 +38,7 @@ def _handle_reset_action(env: Any, env_idx: int, task_idx: Optional[int]) -> Dic
     logger.info(f"[Reset] Starting task {task_idx}, environment index: {env_idx}")
     message = f"Task {task_idx} started"
     env.reset(idx=task_idx)
+    goal = env.server.goals[task_idx]
     return_info = {
         'instruction': env.instruction_text,
         'instruction_simple': env.instruction_simple,
@@ -47,6 +52,12 @@ def _handle_reset_action(env: Any, env_idx: int, task_idx: Optional[int]) -> Dic
             "shopsimulator-environment-v2.1",
         ),
         "observation_state": env.structured_observation(),
+        # Runtime-only metadata used by the trajectory Evidence Store.  The
+        # Agent renderer consumes only observation_state, so this contract is
+        # not injected into the model context.
+        "evidence_constraint_contract": compile_evidence_constraint_contract(
+            goal
+        ),
     }
     if hasattr(env, 'user_persona') and env.user_persona is not None:
         return_info['user_persona'] = env.user_persona

@@ -20,6 +20,8 @@ def product_summary(product: dict, *, rank: int | None = None) -> dict:
     pricing = product.get("Price")
     if pricing is None:
         pricing = product.get("pricing")
+    if isinstance(pricing, (list, tuple)):
+        pricing = pricing[0] if pricing else None
     result = {
         "asin": str(product.get("asin", "")),
         "title": str(product.get("title") or product.get("Title") or ""),
@@ -32,6 +34,27 @@ def product_summary(product: dict, *, rank: int | None = None) -> dict:
     }
     if rank is not None:
         result["rank"] = int(rank)
+    # Optional public fields are carried in the structured result for
+    # trajectory-side evidence extraction.  The canonical renderer remains in
+    # charge of what enters the Actor context.
+    optional_fields = {
+        "model": ("model", "Model"),
+        "inventory": ("inventory", "availability_quantity"),
+        "stock": ("stock",),
+        "availability": ("availability", "availability_status"),
+        "delivery": ("delivery", "delivery_time", "shipping"),
+    }
+    for output_name, source_names in optional_fields.items():
+        value = next(
+            (
+                product.get(source_name)
+                for source_name in source_names
+                if product.get(source_name) not in (None, "", [], {})
+            ),
+            None,
+        )
+        if value is not None:
+            result[output_name] = value
     return result
 
 

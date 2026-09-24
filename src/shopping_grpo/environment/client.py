@@ -27,6 +27,12 @@ class ShopEnvironmentStateError(RuntimeError):
     """The client lifecycle was used out of order."""
 
 
+def is_explicit_external_error(exc: BaseException) -> bool:
+    """Return true only for transport/time-out failures with external origin."""
+
+    return isinstance(exc, (ShopHttpError, TimeoutError))
+
+
 class ShopAgentEnv:
     """一条 trajectory 独占的 ShopSimulator API 租约。"""
 

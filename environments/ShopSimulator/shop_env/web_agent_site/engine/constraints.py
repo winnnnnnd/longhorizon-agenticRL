@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
 
 
 CONSTRAINT_CONTRACT_VERSION = "shopping-task-constraints-v1"
+EVIDENCE_CONSTRAINT_CONTRACT_VERSION = "shopping-evidence-constraints-v1"
 
 
 def _clean_annotation_values(value):
@@ -57,6 +59,95 @@ def compile_task_constraint_contract(instruction_record):
         # The current task data does not label hard versus soft preferences.
         # Do not guess that distinction from keywords.
         "weighted_preferences": [],
+    }
+
+
+def compile_evidence_constraint_contract(goal):
+    """Adapt existing Reward v3 features for trajectory evidence tracking.
+
+    This contract is runtime metadata and is not part of the model-visible
+    observation.  It contains only the user instruction and the already
+    compiled Reward v3 requirement fields; target ASIN/title are never copied.
+    """
+
+    goal = goal if isinstance(goal, dict) else {}
+    rows = []
+
+    def add(constraint_type, attribute, operator, expected_value, description=""):
+        identity = {
+            "constraint_type": str(constraint_type),
+            "attribute": str(attribute),
+            "operator": str(operator),
+            "expected_value": expected_value,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        rows.append(
+            {
+                "constraint_id": digest,
+                **identity,
+                "description": str(description or ""),
+            }
+        )
+
+    if goal.get("category"):
+        add(
+            "category",
+            "product.category",
+            "in_category",
+            goal["category"],
+            "商品品类符合用户请求",
+        )
+    for value in goal.get("expected_brand") or []:
+        add("brand", "product.brand", "eq", value, f"品牌为{value}")
+    for value in goal.get("expected_model") or []:
+        add("model", "product.model", "eq", value, f"型号为{value}")
+    for value in goal.get("expected_core_functions") or []:
+        add(
+            "core_function",
+            "product.key_attributes",
+            "contains",
+            value,
+            f"商品支持{value}",
+        )
+    required_options = goal.get("required_options_by_key")
+    if isinstance(required_options, dict):
+        for axis, requirement in required_options.items():
+            add(
+                "option",
+                f"product.available_options.{axis}",
+                "eq",
+                requirement,
+                f"规格{axis}满足要求",
+            )
+    for unresolved in goal.get("unresolved_option_requirements") or []:
+        if isinstance(unresolved, dict) and unresolved.get("value"):
+            add(
+                "option",
+                "product.available_options.unresolved",
+                "contains",
+                unresolved["value"],
+                f"规格包含{unresolved['value']}",
+            )
+    if goal.get("price_upper") is not None:
+        add(
+            "budget_upper",
+            "product.price",
+            "lte",
+            {"value": goal["price_upper"], "currency": "CNY"},
+            f"价格不超过{goal['price_upper']}元",
+        )
+    return {
+        "version": EVIDENCE_CONSTRAINT_CONTRACT_VERSION,
+        "query": str(goal.get("instruction_text") or ""),
+        "constraints": rows,
     }
 
 

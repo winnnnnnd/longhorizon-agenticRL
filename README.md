@@ -4,6 +4,24 @@
 
 我从 0 到 1 构建了一个面向复杂中文购物需求的长程 Agent 优化系统：将网页购物环境封装成严格的工具协议，采集并审计 Teacher 轨迹，通过 Assistant-only LoRA SFT 建立可用的工具策略，再使用 veRL 0.8 + vLLM 进行在线 GRPO。后训练达到平台期后，我冻结 Actor 参数，从 Teacher/Student 成败轨迹中按阶段沉淀程序性 Experience Card，并在搜索停滞、候选进入、购买前核验与 Guard rejection 等关键事件上做按需召回和临时注入。整个训练、经验演化和 Final-200 Clean 评测过程均保留版本、哈希与轨迹级审计信息。
 
+## 近期更新
+
+### 2026-09-24 · 轨迹级 Evidence Store
+
+为每条购物 trajectory 增加了可 JSON 序列化的 Evidence Store，在工具调用后直接从 ShopSimulator 结构化结果中提取候选商品、价格、规格、库存、送达时间与负面证据，并跟踪每项用户约束的 `verified_pass`、`verified_fail`、`unknown` 和 `conflict` 状态。Evidence Store 仅在单条轨迹内创建和销毁，可用于 Ray Worker、训练日志与离线回放，默认不注入 Actor 上下文。
+
+每一步现在都会记录稳定的 `action_hash` 和 `result_hash`、Evidence Delta、约束覆盖率以及重复类型。只有与用户需求相关的新候选、属性和约束状态变化才计为进展；相同动作与改写 Query 导致的无进展重复被分别标记为 `no_progress_repeat` 和 `semantic_repeat`。用尽步数时还可区分 `no_progress_timeout`、`productive_timeout` 与明确的 `external_error`，为 Reward Evaluator 和 Dynamic Sampling 提供不改变终局 utility 的过程诊断信号。
+
+### 2026-09-14 · Agent Loop 经验沉淀逻辑完善
+
+完善了 Experience-Augmented Agent Loop 的离线经验生成链路：先将 Actor-visible trajectory 按连续决策阶段切分为 Segment，再按轨迹顺序做结构化抽取，并通过稳定 `knowledge_id` 向后传递已确认的约束、候选、证据和风险。聚类阶段使用 phase、failure type、constraint tags、state predicates、action pattern 和 terminal outcome 六维精确键，避免将表面相似但决策条件不同的经验合并。
+
+同时补齐了 Experience Card 的证据引用、泄漏检查、revision 追踪与发布门槛，使每张 Card 都能回溯到 `cluster → segment → trajectory → event`。这些经验只作为可审计的程序性指导，不保存具体商品答案，也不修改 Frozen Actor 权重。
+
+### 2026-09-06 · Frozen Actor Agent Loop 对比实验
+
+增加了 Agent Loop 的配对 A/B 评测与 Active Store 发布流程。Runtime 根据搜索停滞、候选进入、购买前核验和 Guard rejection 等事件按需召回 Experience Card，并以请求级临时注入的方式辅助同一个 Frozen GRPO Actor。在 Final-200 Clean 上，严格成功率由 62.0% 提升至 67.0%，该对比不涉及新的训练 checkpoint。
+
 ![Shopping GRPO 项目全流程](docs/images/project-overview-pipeline.png)
 
 ## 核心结果

@@ -89,6 +89,14 @@ def aggregate_shopping_metrics(shopping_infos: Sequence[object]) -> dict[str, fl
     sampling_invalid = []
     match_scores = []
     evidence_coverage = []
+    trajectory_evidence_progress = []
+    trajectory_constraint_coverage = []
+    no_progress_repeats = []
+    semantic_repeats = []
+    consecutive_no_progress = []
+    no_progress_timeouts = []
+    productive_timeouts = []
+    external_errors = []
     partial_purchase = []
     for index, info in enumerate(shopping_infos):
         if not isinstance(info, Mapping) or not isinstance(info.get("reward"), Mapping):
@@ -132,6 +140,28 @@ def aggregate_shopping_metrics(shopping_infos: Sequence[object]) -> dict[str, fl
         evidence_coverage.append(
             float(reward.get("evidence_coverage", 0.0))
         )
+        trajectory_evidence_progress.append(
+            float(reward.get("evidence_progress_rate", 0.0))
+        )
+        trajectory_constraint_coverage.append(
+            float(reward.get("constraint_coverage", 0.0))
+        )
+        no_progress_repeats.append(
+            float(reward.get("no_progress_repeat_count", 0.0))
+        )
+        semantic_repeats.append(
+            float(reward.get("semantic_repeat_count", 0.0))
+        )
+        consecutive_no_progress.append(
+            float(reward.get("evidence_no_progress_steps", 0.0))
+        )
+        no_progress_timeouts.append(
+            float(info.get("timeout_type") == "no_progress_timeout")
+        )
+        productive_timeouts.append(
+            float(info.get("timeout_type") == "productive_timeout")
+        )
+        external_errors.append(float(bool(info.get("external_error"))))
         partial_purchase.append(
             float(info.get("reward_type") == "partial_alternative_purchase")
         )
@@ -168,6 +198,14 @@ def aggregate_shopping_metrics(shopping_infos: Sequence[object]) -> dict[str, fl
         "trajectory/overlong_rate": mean(overlong),
         "trajectory/repeat_loop_rate": mean(repeat_loop),
         "trajectory/repeat_action_rate": mean(rewards["repeat_action_rate"]),
+        "trajectory/evidence_progress_rate": mean(trajectory_evidence_progress),
+        "trajectory/constraint_coverage": mean(trajectory_constraint_coverage),
+        "trajectory/no_progress_repeat_mean": mean(no_progress_repeats),
+        "trajectory/semantic_repeat_mean": mean(semantic_repeats),
+        "trajectory/consecutive_no_progress_mean": mean(consecutive_no_progress),
+        "trajectory/no_progress_timeout_rate": mean(no_progress_timeouts),
+        "trajectory/productive_timeout_rate": mean(productive_timeouts),
+        "trajectory/external_error_rate": mean(external_errors),
         "trajectory/infrastructure_invalid_rate": mean(infrastructure_invalid),
         "trajectory/reward_unverifiable_rate": mean(reward_unverifiable),
         "trajectory/sampling_invalid_rate": mean(sampling_invalid),

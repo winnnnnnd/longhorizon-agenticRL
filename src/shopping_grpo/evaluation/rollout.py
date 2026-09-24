@@ -23,7 +23,18 @@ from shopping_grpo.environment.context import (
     compact_chat_messages,
 )
 from shopping_grpo.environment.projection import project_observation
-from shopping_grpo.environment.client import ShopAgentEnv, ShopEnvironmentError, ShopHttpError
+from shopping_grpo.environment.client import (
+    ShopAgentEnv,
+    ShopEnvironmentError,
+    ShopHttpError,
+    is_explicit_external_error,
+)
+from shopping_grpo.environment.evidence import (
+    classify_timeout,
+    create_evidence_store,
+    record_empty_tool_evidence,
+    record_tool_evidence,
+)
 from shopping_grpo.environment.tools import (
     SHOP_TOOL_SCHEMAS,
     tool_call_to_action,
@@ -323,6 +334,10 @@ def collect_for_task(
         "done": False,
         "error": None,
         "release_error": None,
+        "evidence_store": None,
+        "timeout_type": None,
+        "outcome_classification": None,
+        "external_error": False,
     }
     experience_session = None
     begin_trajectory = getattr(client, "begin_trajectory", None)
@@ -355,6 +370,16 @@ def collect_for_task(
                 "instruction", initial.get("observation", "")
             )
         trajectory["initial_result"] = initial
+        trajectory["evidence_store"] = create_evidence_store(
+            task_id=int(task["task_id"]),
+            requirement_text=initial.get("instruction", ""),
+            constraint_contract=(
+                _task_evidence_contract(task)
+                or initial.get("evidence_constraint_contract")
+                or initial.get("constraint_contract")
+            ),
+            goal_options=initial.get("goal_options"),
+        )
         messages = _initial_messages(task, initial)
         trajectory["messages"] = messages
         tool_schemas = tools or SHOP_TOOL_SCHEMAS
@@ -405,6 +430,7 @@ def collect_for_task(
                 trajectory["status"] = "assistant_final"
                 break
             tool_call = tool_calls[0]
+            name, arguments = None, None
             try:
                 name, arguments = _tool_call_name_args(tool_call)
                 reason = action_reject_reason(
@@ -416,15 +442,25 @@ def collect_for_task(
                 reason = f"invalid_tool_call:{exc.__class__.__name__}"
             if reason:
                 consecutive_blocked_calls += 1
-                trajectory["blocked_tool_calls"].append(
-                    {
-                        "step_index": len(trajectory["steps"]),
-                        "tool_call": tool_call,
-                        "reason": reason,
-                        "consecutive_count": consecutive_blocked_calls,
-                        "latest_observation_truncated": latest_observation_truncated,
-                    }
-                )
+                blocked = {
+                    "step_index": len(trajectory["steps"]),
+                    "tool_call": tool_call,
+                    "reason": reason,
+                    "consecutive_count": consecutive_blocked_calls,
+                    "latest_observation_truncated": latest_observation_truncated,
+                }
+                if name and isinstance(arguments, dict):
+                    blocked.update(
+                        record_empty_tool_evidence(
+                            trajectory["evidence_store"],
+                            tool_name=name,
+                            arguments=arguments,
+                            step_index=len(
+                                trajectory["evidence_store"]["steps"]
+                            ),
+                        )
+                    )
+                trajectory["blocked_tool_calls"].append(blocked)
                 messages.append(assistant)
                 messages.append(action_guard_tool_message(tool_call, reason, latest_observation))
                 if consecutive_blocked_calls >= MAX_BLOCKED_TOOL_CALLS:
@@ -437,6 +473,25 @@ def collect_for_task(
             messages.append(assistant)
             # 只有通过当前 observation 守卫的调用才会触碰环境并消耗一个执行步骤。
             step = _execute_tool_call(env, tool_call, len(trajectory["steps"]))
+            evidence_step = record_tool_evidence(
+                trajectory["evidence_store"],
+                tool_name=step["tool_name"],
+                arguments=step["parameters"],
+                observation_state=(step["result"].get("observation_state")),
+                step_index=len(trajectory["evidence_store"]["steps"]),
+                environment_action=step["env_action"],
+            )
+            for key in (
+                "action_hash",
+                "result_hash",
+                "result_product_ids",
+                "evidence_delta",
+                "has_progress",
+                "repeat_type",
+                "consecutive_no_progress_steps",
+                "constraint_coverage",
+            ):
+                step[key] = evidence_step[key]
             raw_observation = step["observation"]
             projector = getattr(client, "project_observation", None)
             if projector is not None:
@@ -461,19 +516,50 @@ def collect_for_task(
                 trajectory["terminal_result"] = step["result"]
                 trajectory["final_reward"] = step["reward"]
                 trajectory["done"] = True
+                reward_detail = step["result"].get("reward_detail") or {}
+                if reward_detail.get("reward_type") == "max_steps":
+                    trajectory["timeout_type"] = classify_timeout(
+                        trajectory["evidence_store"]
+                    )
+                    trajectory["outcome_classification"] = trajectory[
+                        "timeout_type"
+                    ]
                 return trajectory
         else:
             trajectory["status"] = "max_steps"
+            trajectory["timeout_type"] = classify_timeout(
+                trajectory["evidence_store"]
+            )
+            trajectory["outcome_classification"] = trajectory[
+                "timeout_type"
+            ]
         if trajectory["steps"]:
             trajectory["final_reward"] = trajectory["steps"][-1]["reward"]
     except ToolExecutionError as exc:
+        if trajectory.get("evidence_store") is not None:
+            evidence_step = record_empty_tool_evidence(
+                trajectory["evidence_store"],
+                tool_name=exc.step.get("tool_name"),
+                arguments=exc.step.get("parameters"),
+                step_index=len(trajectory["evidence_store"]["steps"]),
+            )
+            exc.step.update(evidence_step)
         trajectory["steps"].append(exc.step)
         trajectory["status"] = "error"
         trajectory["error"] = {
             "type": exc.original.__class__.__name__,
             "message": str(exc.original),
-            "traceback": "".join(traceback.format_exception(exc.original)),
+            "traceback": "".join(
+                traceback.format_exception(
+                    type(exc.original),
+                    exc.original,
+                    exc.original.__traceback__,
+                )
+            ),
         }
+        trajectory["external_error"] = is_explicit_external_error(exc.original)
+        if trajectory["external_error"]:
+            trajectory["outcome_classification"] = "external_error"
     except Exception as exc:
         trajectory["status"] = "error"
         trajectory["error"] = {
@@ -481,6 +567,9 @@ def collect_for_task(
             "message": str(exc),
             "traceback": traceback.format_exc(),
         }
+        trajectory["external_error"] = is_explicit_external_error(exc)
+        if trajectory["external_error"]:
+            trajectory["outcome_classification"] = "external_error"
     finally:
         try:
             env.release()
@@ -552,6 +641,8 @@ def collect_tasks(
 
 def _is_infrastructure_failure(trajectory):
     """环境或模型服务不可用时中断；普通任务失败仍保留并继续。"""
+    if trajectory.get("external_error"):
+        return True
     if trajectory.get("release_error"):
         return True
     error = trajectory.get("error") or {}
@@ -641,6 +732,29 @@ def _task_id(row):
         return extra["task_id"]
     kwargs = extra.get("interaction_kwargs") or {}
     return kwargs.get("task_id")
+
+
+def _task_evidence_contract(task):
+    """Use a precomputed Rubric when an evaluation task already carries one."""
+
+    sources = [task]
+    extra = task.get("extra_info")
+    if isinstance(extra, dict):
+        sources.append(extra)
+    for source in sources:
+        for key in (
+            "evidence_constraint_contract",
+            "requirement_rubric",
+            "rubric_bundle",
+            "constraint_contract",
+        ):
+            value = source.get(key)
+            if isinstance(value, dict) and any(
+                contract_key in value
+                for contract_key in ("constraints", "rubrics", "hard_constraints")
+            ):
+                return value
+    return None
 
 
 def _tool_call_name_args(tool_call):

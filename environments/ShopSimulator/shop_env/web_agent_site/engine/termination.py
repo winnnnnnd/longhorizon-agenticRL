@@ -16,6 +16,7 @@ from web_agent_site.engine.search import normalize_query
 
 TERMINATION_VERSION = "shopping-termination-v3"
 PAGINATION_ACTIONS = {"next >", "< prev"}
+SEMANTIC_RESULT_OVERLAP = 0.80
 
 
 def canonical_action(action_name: str, action_argument: object) -> str:
@@ -37,6 +38,16 @@ def _result_set_fingerprint(visible_asins) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _result_overlap(left, right) -> float:
+    left_set = {str(value) for value in left}
+    right_set = {str(value) for value in right}
+    if not left_set and not right_set:
+        return 1.0
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set.intersection(right_set)) / len(left_set.union(right_set))
+
+
 @dataclass
 class EvidenceProgressTracker:
     max_steps: int = 35
@@ -48,6 +59,8 @@ class EvidenceProgressTracker:
     result_set_progress_budget: int = 3
     steps: int = 0
     last_signature: str | None = None
+    last_action_name: str | None = None
+    last_visible_asins: tuple[str, ...] = ()
     consecutive_repeats: int = 0
     no_progress_steps: int = 0
     seen_asins: set[str] = field(default_factory=set)
@@ -76,12 +89,6 @@ class EvidenceProgressTracker:
     ):
         self.steps += 1
         signature = canonical_action(action_name, action_argument)
-        if signature == self.last_signature:
-            self.consecutive_repeats += 1
-        else:
-            self.consecutive_repeats = 0
-        self.last_signature = signature
-
         normalized_name = str(action_name or "").strip().casefold()
         normalized_argument = str(action_argument or "").strip().casefold()
         visible_ordered = tuple(str(asin) for asin in visible_asins)
@@ -160,6 +167,25 @@ class EvidenceProgressTracker:
                 runtime_progress_added.append(key)
                 credited_evidence_added.append(key)
 
+        repeat_type = None
+        overlap = _result_overlap(visible_ordered, self.last_visible_asins)
+        if not runtime_progress_added:
+            if signature == self.last_signature and overlap >= SEMANTIC_RESULT_OVERLAP:
+                repeat_type = "no_progress_repeat"
+            elif (
+                normalized_name == "search"
+                and self.last_action_name == "search"
+                and overlap >= SEMANTIC_RESULT_OVERLAP
+            ):
+                repeat_type = "semantic_repeat"
+        if repeat_type is not None:
+            self.consecutive_repeats += 1
+        else:
+            self.consecutive_repeats = 0
+        self.last_signature = signature
+        self.last_action_name = normalized_name
+        self.last_visible_asins = visible_ordered
+
         if runtime_progress_added:
             self.no_progress_steps = 0
         else:
@@ -177,6 +203,9 @@ class EvidenceProgressTracker:
             "termination_reason": reason,
             "step_count": self.steps,
             "action_signature": signature,
+            "action_hash": hashlib.sha256(signature.encode("utf-8")).hexdigest(),
+            "result_hash": _result_set_fingerprint(visible_ordered),
+            "repeat_type": repeat_type,
             "consecutive_repeats": self.consecutive_repeats,
             "no_progress_steps": self.no_progress_steps,
             # Compatibility field: evidence that counts toward bounded abstention

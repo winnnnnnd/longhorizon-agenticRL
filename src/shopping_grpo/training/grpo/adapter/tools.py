@@ -8,6 +8,12 @@ from typing import Any
 from uuid import uuid4
 
 from shopping_grpo.environment.actions import action_reject_reason
+from shopping_grpo.environment.client import is_explicit_external_error
+from shopping_grpo.environment.evidence import (
+    classify_timeout,
+    record_empty_tool_evidence,
+    record_tool_evidence,
+)
 from shopping_grpo.environment.tools import tool_call_to_action
 from shopping_grpo.environment.observation import render_structured_observation
 from shopping_grpo.training.grpo.adapter.runtime import (
@@ -54,14 +60,21 @@ class ShopSimulatorTool(BaseTool):
         if state["done"] or state["terminate"]:
             return ToolResponse(text="Error: environment is already terminal; do not call another tool."), 0.0, {}
         if len(state["steps"]) >= state["max_steps"]:
-            _terminate(state, "max_steps")
+            _terminate_max_steps(state)
             return ToolResponse(text="Error: maximum executed tool steps reached."), 0.0, {"reason": "max_steps"}
         parameters = parameters if isinstance(parameters, dict) else {}
         # think 不触碰环境，只记录一次模型决策；其余工具必须经过动作守卫。
         if self.name == "think":
             step = _append_step(state, self.name, parameters)
+            _attach_evidence(
+                state,
+                step,
+                tool_name=self.name,
+                parameters=parameters,
+                observation_state=None,
+            )
             if len(state["steps"]) >= state["max_steps"]:
-                _terminate(state, "max_steps")
+                _terminate_max_steps(state)
                 return ToolResponse(text="Error: maximum executed tool steps reached."), 0.0, step
             return ToolResponse(text="Reasoning recorded. Continue with one environment tool call."), 0.0, step
         observation = state.get("latest_observation", "")
@@ -71,6 +84,12 @@ class ShopSimulatorTool(BaseTool):
         )
         reason = action_reject_reason(self.name, parameters, observation)
         if reason:
+            _record_nonexecuted_attempt(
+                state,
+                tool_name=self.name,
+                parameters=parameters,
+                outcome="guard_rejection",
+            )
             state["guard_rejection_count"] += 1
             reason_counts = state["guard_rejection_reason_counts"]
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
@@ -105,12 +124,39 @@ class ShopSimulatorTool(BaseTool):
                 reward=float(result.get("reward", 0.0)),
             )
         except Exception as exc:
+            external_error = is_explicit_external_error(exc)
+            _record_nonexecuted_attempt(
+                state,
+                tool_name=self.name,
+                parameters=parameters,
+                outcome="external_error" if external_error else "tool_error",
+            )
             _terminate(
                 state,
                 f"tool_error:{exc.__class__.__name__}:{exc}",
                 infrastructure_invalid=True,
+                external_error=external_error,
             )
             return ToolResponse(text=f"Error: ShopSimulator tool execution failed: {exc}"), 0.0, {"error": state["error"]}
+        try:
+            _attach_evidence(
+                state,
+                step,
+                tool_name=self.name,
+                parameters=parameters,
+                observation_state=result.get("observation_state"),
+                environment_action=action,
+            )
+        except Exception as exc:
+            _terminate(
+                state,
+                f"evidence_store_error:{exc.__class__.__name__}:{exc}",
+                infrastructure_invalid=True,
+            )
+            step["evidence_error"] = state["error"]
+            return ToolResponse(
+                text="Error: trajectory evidence update failed; sample is invalid."
+            ), 0.0, step
         state["consecutive_guard_rejections"] = 0
         if step["done"]:
             state["done"] = True
@@ -155,6 +201,13 @@ class ShopSimulatorTool(BaseTool):
                         state["termination_reason"] = public_detail[
                             "termination_reason"
                         ]
+                        if public_detail["reward_type"] == "max_steps":
+                            state["timeout_type"] = classify_timeout(
+                                state["evidence_store"]
+                            )
+                            state["outcome_classification"] = state[
+                                "timeout_type"
+                            ]
                 else:
                     _mark_infrastructure_invalid(
                         state,
@@ -165,7 +218,7 @@ class ShopSimulatorTool(BaseTool):
         state["latest_observation_raw"] = observation
         state["_pending_raw_observation"] = observation
         if len(state["steps"]) >= state["max_steps"]:
-            _terminate(state, "max_steps")
+            _terminate_max_steps(state)
             return ToolResponse(text="Error: maximum executed tool steps reached."), 0.0, step
         return ToolResponse(text=observation), 0.0, step
 
@@ -187,16 +240,132 @@ def _append_step(state, tool, parameters, done=False, reward=0.0):
     return step
 
 
+def _attach_evidence(
+    state,
+    step,
+    *,
+    tool_name,
+    parameters,
+    observation_state,
+    environment_action=None,
+):
+    """Attach the trajectory Evidence Store's audit fields to one step."""
+
+    if isinstance(observation_state, dict):
+        evidence_step = record_tool_evidence(
+            state["evidence_store"],
+            tool_name=tool_name,
+            arguments=parameters,
+            observation_state=observation_state,
+            step_index=len(state["evidence_store"]["steps"]),
+            environment_action=environment_action,
+        )
+    else:
+        evidence_step = record_empty_tool_evidence(
+            state["evidence_store"],
+            tool_name=tool_name,
+            arguments=parameters,
+            step_index=len(state["evidence_store"]["steps"]),
+        )
+    for key in (
+        "action_hash",
+        "result_hash",
+        "result_product_ids",
+        "evidence_delta",
+        "has_progress",
+        "repeat_type",
+        "consecutive_no_progress_steps",
+        "constraint_coverage",
+    ):
+        step[key] = evidence_step[key]
+    if state["action_attempt_log"]:
+        latest_attempt = state["action_attempt_log"][-1]
+        if latest_attempt.get("action_hash") == evidence_step["action_hash"]:
+            latest_attempt.update(
+                {
+                    "outcome": "executed",
+                    "result_hash": evidence_step["result_hash"],
+                    "evidence_delta": evidence_step["evidence_delta"],
+                    "has_progress": evidence_step["has_progress"],
+                    "repeat_type": evidence_step["repeat_type"],
+                    "consecutive_no_progress_steps": evidence_step[
+                        "consecutive_no_progress_steps"
+                    ],
+                    "constraint_coverage": evidence_step[
+                        "constraint_coverage"
+                    ],
+                }
+            )
+    state["repeat_action_count"] = _repeat_environment_action_count(state)
+
+
+def _record_nonexecuted_attempt(
+    state,
+    *,
+    tool_name,
+    parameters,
+    outcome,
+):
+    """Audit a Guard/tool error result without fabricating environment facts."""
+
+    evidence_step = record_empty_tool_evidence(
+        state["evidence_store"],
+        tool_name=tool_name,
+        arguments=parameters,
+        step_index=len(state["evidence_store"]["steps"]),
+    )
+    if state["action_attempt_log"]:
+        state["action_attempt_log"][-1].update(
+            {
+                "outcome": str(outcome),
+                "result_hash": evidence_step["result_hash"],
+                "evidence_delta": evidence_step["evidence_delta"],
+                "has_progress": evidence_step["has_progress"],
+                "repeat_type": evidence_step["repeat_type"],
+                "consecutive_no_progress_steps": evidence_step[
+                    "consecutive_no_progress_steps"
+                ],
+                "constraint_coverage": evidence_step[
+                    "constraint_coverage"
+                ],
+            }
+        )
+    state["repeat_action_count"] = _repeat_environment_action_count(state)
+
+
+def _repeat_environment_action_count(state):
+    return sum(
+        1
+        for item in state["evidence_store"]["steps"]
+        if item.get("tool") != "think" and item.get("repeat_type") is not None
+    )
+
+
 def _mark_infrastructure_invalid(state, reason):
     state["infrastructure_invalid"] = True
     state["termination_reason"] = reason
     state["error"] = reason
 
 
-def _terminate(state, reason, *, infrastructure_invalid=False):
+def _terminate(
+    state,
+    reason,
+    *,
+    infrastructure_invalid=False,
+    external_error=False,
+):
     """标记 trajectory 停止；基础设施错误不会被误当成模型奖励。"""
     state["terminate"] = True
     state["termination_reason"] = reason
     state["error"] = reason
     if infrastructure_invalid:
         state["infrastructure_invalid"] = True
+    if external_error:
+        state["external_error"] = True
+        state["outcome_classification"] = "external_error"
+
+
+def _terminate_max_steps(state):
+    state["timeout_type"] = classify_timeout(state["evidence_store"])
+    state["outcome_classification"] = state["timeout_type"]
+    _terminate(state, "max_steps")

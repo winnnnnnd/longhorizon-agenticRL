@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 
 from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
@@ -18,6 +19,7 @@ from shopping_grpo.environment.projection import (
 from shopping_grpo.training.grpo.adapter.runtime import (
     apply_reward_length_shaping,
     current_runtime_state,
+    evidence_contract_from_kwargs,
     record_observation_projection,
     reward_breakdown,
     task_id_from_kwargs,
@@ -262,7 +264,10 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             required_environment_version=self.required_environment_version,
             env_factory=self.env_factory,
         )
-        state = await session.start(task_id)
+        state = await session.start(
+            task_id,
+            constraint_contract=evidence_contract_from_kwargs(kwargs),
+        )
         try:
             output = await super().run(sampling_params, **kwargs)
             if not state["done"] and not state["error"]:
@@ -290,8 +295,14 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                     {"tool": step["tool"], "parameters": step["parameters"]}
                     for step in state["steps"]
                 ],
+                "trajectory_steps": deepcopy(state["steps"]),
+                "action_attempt_log": deepcopy(state["action_attempt_log"]),
+                "evidence_store": deepcopy(state["evidence_store"]),
                 "done": bool(state["done"]),
                 "termination_reason": state["termination_reason"],
+                "timeout_type": state.get("timeout_type"),
+                "outcome_classification": state.get("outcome_classification"),
+                "external_error": bool(state.get("external_error", False)),
                 "error": state["error"],
                 "infrastructure_invalid": bool(state["infrastructure_invalid"]),
                 "action_attempts": int(state["action_attempt_count"]),

@@ -2,6 +2,8 @@ import unittest
 
 from web_agent_site.engine.constraints import (
     CONSTRAINT_CONTRACT_VERSION,
+    EVIDENCE_CONSTRAINT_CONTRACT_VERSION,
+    compile_evidence_constraint_contract,
     compile_task_constraint_contract,
     deterministic_price_upper,
     explicit_budget_from_instruction,
@@ -75,6 +77,33 @@ class GoalV2Test(unittest.TestCase):
             }
         )
         self.assertFalse(contract["hard_constraints"]["complete"])
+
+    def test_evidence_contract_reuses_reward_features_without_target_identity(self):
+        contract = compile_evidence_constraint_contract(
+            {
+                "asin": "hidden-target",
+                "name": "hidden title",
+                "instruction_text": "买42码且不超过500元的跑步鞋",
+                "category": "服饰 › 鞋靴",
+                "expected_core_functions": ["防水"],
+                "required_options_by_key": {
+                    "size": {"value": "42", "source_axis": "尺码"}
+                },
+                "price_upper": 500,
+            }
+        )
+
+        self.assertEqual(
+            contract["version"],
+            EVIDENCE_CONSTRAINT_CONTRACT_VERSION,
+        )
+        serialized = str(contract)
+        self.assertNotIn("hidden-target", serialized)
+        self.assertNotIn("hidden title", serialized)
+        self.assertEqual(
+            {item["constraint_type"] for item in contract["constraints"]},
+            {"category", "core_function", "option", "budget_upper"},
+        )
 
 
 if __name__ == "__main__":
